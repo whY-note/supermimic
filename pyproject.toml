@@ -12,6 +12,8 @@ license-files = ["LICENSE"]
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "mjlab",
+    # mjviser 0.0.17 pulls in mujoco-core 4.x, conflicting with mjlab's MuJoCo 3.16.
+    "mjviser==0.0.16",
     "ruff>=0.14.10",
     "viser>=1.0.24",
 ]
