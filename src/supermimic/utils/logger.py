@@ -4,12 +4,12 @@ import statistics
 import time
 from collections import deque
 
+import swanlab
 import torch
-import wandb
 
 
 class Logger:
-  """Episode statistics of the real env, logged as one W&B row and one console
+  """Episode statistics of the real env, logged as one SwanLab row and one console
   block per log call."""
 
   def __init__(
@@ -177,7 +177,7 @@ class Logger:
       row["Train/mean_reward"] = statistics.mean(self.rewbuffer)
       row["Train/mean_episode_length"] = statistics.mean(self.lenbuffer)
     row |= {k if "/" in k else f"Episode/{k}": v for k, v in extras.items()}
-    wandb.log(row, step=it)
+    swanlab.log(row, step=it)
     print(
       self._build_console_log(
         it,

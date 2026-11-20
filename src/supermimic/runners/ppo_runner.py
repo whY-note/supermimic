@@ -10,7 +10,7 @@ from tensordict import TensorDict
 
 from supermimic.representations import extract_actor_goal
 from supermimic.runners.supermimic_runner import BaseRunner, BaseRunnerCfg
-from supermimic.utils.wandb_artifacts import log_model_artifact
+from supermimic.utils.checkpoints import archive_checkpoint
 
 
 @dataclass
@@ -179,10 +179,11 @@ class PpoRunner(BaseRunner[PpoRunnerCfg]):
 
   def run(self) -> None:
     log_dir = self._create_log_dir("ppo")
-    self._init_wandb(log_dir, name_suffix="-ppo")
+    self._init_swanlab(log_dir, name_suffix="-ppo")
     self._seed_sim_history()
 
     print(f"[INFO] Starting MBPO training loop for {self.cfg.max_iterations} iters...")
+    checkpoint_version = 0
 
     for iteration in range(self.cfg.max_iterations):
       start_time = time.time()
@@ -217,7 +218,8 @@ class PpoRunner(BaseRunner[PpoRunnerCfg]):
           num_collected_steps=num_collected_steps,
         )
 
-      if (iteration + 1) % self.cfg.save_interval == 0:
+      step = iteration + 1
+      if step % self.cfg.save_interval == 0 or step == self.cfg.max_iterations:
         world_model_path = str(log_dir / "world_model.pt")
         actor_path = str(log_dir / "actor.pt")
         torch.save(self._wm.bundle(), world_model_path)
@@ -228,6 +230,9 @@ class PpoRunner(BaseRunner[PpoRunnerCfg]):
           },
           actor_path,
         )
-        log_model_artifact([world_model_path, actor_path])
+        checkpoint_version += 1
+        archive_checkpoint(
+          [world_model_path, actor_path], step=step, version=checkpoint_version
+        )
 
     self._cleanup()

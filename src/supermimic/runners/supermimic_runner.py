@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
+import swanlab
 import torch
 import torch.nn as nn
 import tyro
-import wandb
 from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
@@ -34,21 +33,24 @@ from supermimic.tasks.task_spec import (
   build_actor_obs_td,
   resolve_task_specs,
 )
+from supermimic.utils.checkpoints import archive_checkpoint, write_run_config
 from supermimic.utils.helpers import (
   extract_action_scale_offset,
   unpack_obs_dims,
 )
 from supermimic.utils.logger import Logger
-from supermimic.utils.wandb_artifacts import download_model_dir, log_model_artifact
 
 
 @dataclass
 class BaseRunnerCfg:
   """Shared configuration fields for all runners."""
 
-  wandb_project: str = "supermimic"
+  swanlab_project: str = "supermimic"
+  swanlab_workspace: str | None = None
+  swanlab_mode: Literal["online", "offline", "local", "disabled"] | None = None
   run_name: str | None = None
-  wandb_run_path: str | None = None
+  world_model_dir: str | None = None
+  """Initialize only world-model weights from a local directory; not a full resume."""
   headless: bool = True
   buffer_size: int = 1000
   representation: str = "gencoord"  # "gencoord" or "maxcoord"
@@ -198,13 +200,11 @@ def build_actor(
   ).to(device)
 
 
-def load_wandb_checkpoint(wandb_run_path: str, wm: WorldModel, device: str) -> None:
-  """Warm-start ``wm`` from another W&B run's world-model bundle."""
-  print(f"[INFO] Loading World Model from W&B: {wandb_run_path}")
-  run = wandb.Api().run(wandb_run_path)
-  wm.load_bundle(
-    torch.load(download_model_dir(run) / "world_model.pt", map_location=device)
-  )
+def load_local_checkpoint(model_dir: str, wm: WorldModel, device: str) -> None:
+  """Initialize world-model weights from disk, without resuming policy/optimizers."""
+  path = Path(model_dir).expanduser().resolve() / "world_model.pt"
+  print(f"[INFO] Loading World Model from {path}")
+  wm.load_bundle(torch.load(path, map_location=device))
 
 
 class Ratio:
@@ -241,13 +241,11 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
     env,
     cfg: CfgT,
     task_id: str,
-    registry_name: str | None = None,
     device: str = "cuda:0",
   ):
     self.env = env
     self.cfg = cfg
     self.task_id = task_id
-    self.registry_name = registry_name
     self.device = device
 
     self._init_common()
@@ -269,8 +267,8 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
     self._num_goals = wm.num_goals
     self._num_actions = wm.num_actions
 
-    if self.cfg.wandb_run_path is not None:
-      load_wandb_checkpoint(self.cfg.wandb_run_path, wm, self.device)
+    if self.cfg.world_model_dir is not None:
+      load_local_checkpoint(self.cfg.world_model_dir, wm, self.device)
 
     self.action_manager = self.env.unwrapped.action_manager
     self.motion_cmd = self.env.unwrapped.command_manager.get_term("motion")
@@ -463,36 +461,35 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
     print(f"[INFO] Logging to {log_dir}")
     return log_dir
 
-  def _init_wandb(self, log_dir: Path, name_suffix: str = "") -> None:
-    """Initialize the W&B run and link the registry artifacts."""
-    wandb_config = {
+  def _init_swanlab(self, log_dir: Path, name_suffix: str = "") -> None:
+    """Persist the inference config locally and initialize SwanLab tracking."""
+    run_config = {
       "env_cfg": asdict(self.env.cfg),
       "runner_cfg": asdict(self.cfg),
+      "runner_type": type(self.cfg).__name__,
+      "task_id": self.task_id,
+      "motion_file": self.env.unwrapped.cfg.commands["motion"].motion_file,
+      "model_dir": str(log_dir.resolve()),
     }
+    run_config = write_run_config(log_dir, run_config)
 
     default_name = f"{self.task_id}{name_suffix}-{log_dir.name}"
-    wandb.init(
-      project=self.cfg.wandb_project,
+    self._swanlab_run = swanlab.init(
+      project=self.cfg.swanlab_project,
+      workspace=self.cfg.swanlab_workspace,
+      mode=self.cfg.swanlab_mode,
       name=self.cfg.run_name or default_name,
-      config=wandb_config,
+      log_dir=str(log_dir / "swanlog"),
+      config=run_config,
     )
-
-    if self.registry_name:
-      api = wandb.Api()
-      for name in self.registry_name.split(","):
-        name = name.strip()
-        if ":" not in name:
-          name = name + ":latest"
-        print(f"[INFO] Linking registry artifact: {name}")
-        artifact = api.artifact(name)
-        wandb.run.use_artifact(artifact)
+    self.logger.run_name = self._swanlab_run.name
 
   def _cleanup(self) -> None:
-    """Close environment and finish W&B run."""
+    """Close environment and finish the SwanLab run."""
     env_close_fn = getattr(self.env, "close", None)
     if env_close_fn:
       env_close_fn()
-    wandb.finish()
+    swanlab.finish()
 
 
 class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
@@ -653,7 +650,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
 
   def run(self) -> None:
     log_dir = self._create_log_dir()
-    self._init_wandb(log_dir)
+    self._init_swanlab(log_dir)
 
     self.env.reset()
     self._seed_sim_history()
@@ -674,8 +671,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
     policy_learn_time = 0.0
     loss_dict: dict[str, torch.Tensor] = {}
     log_count = 0
-    uploader = ThreadPoolExecutor(max_workers=1)
-    upload: Future | None = None
+    checkpoint_version = 0
 
     for step in range(self.cfg.max_iterations):
       num_collected_steps += self.step()
@@ -721,11 +717,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
         policy_learn_time = 0
         num_collected_steps = 0
 
-      if step % self.cfg.save_interval == 0:
-        assert wandb.run is not None  # _init_wandb ran before the loop
-        # The previous version must be logged before its files are overwritten.
-        if upload is not None:
-          upload.result()
+      if step % self.cfg.save_interval == 0 or step == self.cfg.max_iterations - 1:
         world_model_path = str(log_dir / "world_model.pt")
         actor_path = str(log_dir / "actor.pt")
         torch.save(self._wm.bundle(), world_model_path)
@@ -745,10 +737,10 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
             actor=self.policy_learner.actor,
             env=self.env.unwrapped,
             path=str(log_dir),
-            run_name=wandb.run.name,
+            run_name=self._swanlab_run.name,
             term_widths=self._representation.proprio_term_widths(self._num_actions),
           )
-        upload = uploader.submit(log_model_artifact, checkpoint_files)
+        checkpoint_version += 1
+        archive_checkpoint(checkpoint_files, step=step, version=checkpoint_version)
 
-    uploader.shutdown()
     self._cleanup()

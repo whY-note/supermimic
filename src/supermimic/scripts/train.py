@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 import mjlab.tasks  # noqa: F401
@@ -14,9 +13,9 @@ import supermimic.tasks  # noqa: F401
 from supermimic.runners.supermimic_runner import SuperMimicRunner, SuperMimicRunnerCfg
 from supermimic.scripts.train_utils import (
   create_env,
-  download_registry_motions,
   setup_device,
 )
+from supermimic.utils.checkpoints import DEFAULT_MOTION_FILE, resolve_motion_files
 
 
 @dataclass
@@ -27,8 +26,8 @@ class TrainConfig:
   # Experiment & Environment
   num_envs: int = 4096
   device: str | None = None
-  registry_name: str | None = "supermimic/wandb-registry-motions/lafan_run1_subject5"
-  motion_file: str | None = None
+  motion_file: str = DEFAULT_MOTION_FILE
+  """Local NPZ, comma-separated files, glob, or packed motion directory."""
 
   @staticmethod
   def from_task(task_id: str) -> "TrainConfig":
@@ -58,20 +57,8 @@ def main() -> None:
   device = setup_device(args.device)
   print(f"[INFO] Loading environment: {chosen_task}")
 
-  if args.motion_file:
-    # Local motions handed straight to MotionLoader (globs/concatenates).
-    if "," in args.motion_file:
-      args.env.commands["motion"].motion_file = [
-        os.path.expanduser(p.strip()) for p in args.motion_file.split(",")
-      ]
-    else:
-      args.env.commands["motion"].motion_file = os.path.expanduser(args.motion_file)
-    args.registry_name = None  # avoid linking a stale registry artifact for lineage
-    print(f"[INFO] Using local motion file: {args.motion_file}")
-  else:
-    motion_file = download_registry_motions(args.registry_name)
-    if motion_file is not None:
-      args.env.commands["motion"].motion_file = motion_file
+  args.env.commands["motion"].motion_file = resolve_motion_files(args.motion_file)
+  print(f"[INFO] Using local motion: {args.env.commands['motion'].motion_file}")
 
   # Auto-detect representation from task_id if not explicitly set
   if "MaxCoord" in chosen_task and args.runner.representation == "gencoord":
@@ -89,7 +76,6 @@ def main() -> None:
     env=env,
     cfg=args.runner,
     task_id=chosen_task,
-    registry_name=args.registry_name,
     device=device,
   )
 

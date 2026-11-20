@@ -1,4 +1,4 @@
-"""Tests for rebuilding a runner config from a wandb-serialized dict."""
+"""Tests for rebuilding a runner config from a JSON-serialized dict."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from supermimic.runners.supermimic_runner import SuperMimicRunnerCfg
 
 
 def _serialized(cfg: SuperMimicRunnerCfg) -> dict:
-  """What wandb hands back: the cfg after a JSON round-trip."""
+  """The saved runner config after a JSON round-trip."""
   return json.loads(json.dumps(asdict(cfg)))
 
 

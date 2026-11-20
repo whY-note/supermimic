@@ -59,7 +59,7 @@ flowchart TD
 | 默认接口分配 | motion=1.0、velocity=0.0，默认没有速度接口训练样本 | `SuperMimicRunnerCfg.slot_mix` |
 | 迭代次数 | 主 runner 默认 1,000,000 次 | `SuperMimicRunnerCfg.max_iterations` |
 | 学习率 | 当前主循环未实现 cosine 学习率调度 | `SuperMimicRunner.run()` |
-| 默认动作数据 | `lafan_run1_subject5` W&B artifact | `scripts/train.py:TrainConfig` |
+| 默认动作数据 | `data/lafan_run1_subject5/motion.npz` 本地文件 | `scripts/train.py:TrainConfig` |
 
 其中“8 个状态只产生 7 个转移”来自代码中 `range(actions.shape[1] - 1)`，是读实现时需要记住的计数方式。
 
@@ -286,10 +286,10 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 - `SuperMimicRunnerCfg`：增加 actor/critic 宽度、latent、接口 slot 比例、策略学习器选项、重置采样和训练频率配置。
 - `WorldModel`：保存 representation、Dynamics、SimContext 及维度信息的 dataclass。`bundle()` 和 `load_bundle()` 保存/恢复 Dynamics 与上下文 buffer；表示层按配置和环境重新创建。
 - `Ratio`：将实数频率转成整数次更新，让模型学习与环境采集不必每步一一对应。
-- `BaseRunner`：共同初始化与采样设施。`_init_common()` 创建模型和 replay；`_buffer_schema()` 定义记录字段；`_step_and_store()` 执行真实环境动作并保存动作执行前的状态；`_seed_sim_history()`、`_collection_history()`、`_advance_sim_history()` 维护真实传感器历史；`_flush_normalization()` 在采集推理模式之外更新统计量；其余方法处理日志、W&B 与清理。
+- `BaseRunner`：共同初始化与采样设施。`_init_common()` 创建模型和 replay；`_buffer_schema()` 定义记录字段；`_step_and_store()` 执行真实环境动作并保存动作执行前的状态；`_seed_sim_history()`、`_collection_history()`、`_advance_sim_history()` 维护真实传感器历史；`_flush_normalization()` 在采集推理模式之外更新统计量；其余方法处理日志、SwanLab 与清理。
 - `SuperMimicRunner`：主算法。`_init_policy()` 创建多编码器 actor、一个 critic、模型环境和 learner；`_build_sim_obs_td()` 为真实采样组装同格式输入；`_configure_reset_sampling()` 安装 ReturnSampler；`step()` 执行带噪动作、存数据并更新 reset 分布；`run()` 调度模型训练、策略训练、日志与 checkpoint。
 
-顶层 `build_world_model()` 从真实环境推断维度，建立状态表示、上下文和 Dynamics；`build_actor()` 按配置建立 MultiEncoderAE；`load_wandb_checkpoint()` 用已有 run 的世界模型进行初始化，不能理解为恢复整套训练状态。
+顶层 `build_world_model()` 从真实环境推断维度，建立状态表示、上下文和 Dynamics；`build_actor()` 按配置建立 MultiEncoderAE；`load_local_checkpoint()` 用本地目录中的世界模型进行初始化，不能理解为恢复整套训练状态。
 
 `run()` 中每次外层循环采一个真实环境步，再由 Ratio 决定训练次数。默认计算为：
 
@@ -299,7 +299,7 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 
 也就是平均每 2.5 个采集步触发一轮更新；一轮包含 10 个世界模型 batch，再调用一次策略 learner。它不是每个外层 step 固定做 16 次 actor 更新。
 
-默认 checkpoint 为 `world_model.pt`、`actor.pt`，存在 critic 时另存 `critic.pt`；W&B 上传通过单线程 executor 调度。只有 proprio 模式且动作数据总帧数不超过 15,000 时，当前主循环才自动导出 ONNX。checkpoint 不包含优化器、replay 和完整迭代状态，因此不应当作精确断点续训快照。
+默认 checkpoint 为 `world_model.pt`、`actor.pt`，存在 critic 时另存 `critic.pt`；模型保存在本地，同时保存 config.json；checkpoints/<step>/ 保留最近五个版本和每第 25 个版本，训练结束也保存最终权重。只有 proprio 模式且动作数据总帧数不超过 15,000 时，当前主循环才自动导出 ONNX。checkpoint 不包含优化器、replay 和完整迭代状态，因此不应当作精确断点续训快照。
 
 ### src/supermimic/runners/reset_sampling.py
 
@@ -323,7 +323,7 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 
 [打开源码](../src/supermimic/runners/run_config.py)
 
-没有类。`load_runner_cfg()` 从 W&B JSON 重建 SuperMimicRunnerCfg；`_rebuild()` 递归恢复 dataclass；`_coerce()` 恢复 tuple 与配置联合类型；`_pick_variant()` 根据字段重合确定 BPTT/AC 分支。未知字段忽略，缺字段用当前默认值并提示。
+没有类。`load_runner_cfg()` 从本地 config.json 重建 SuperMimicRunnerCfg；`_rebuild()` 递归恢复 dataclass；`_coerce()` 恢复 tuple 与配置联合类型；`_pick_variant()` 根据字段重合确定 BPTT/AC 分支。未知字段忽略，缺字段用当前默认值并提示。
 
 `check_representation_matches()` 检查任务名要求的 GenCoord/MaxCoord 与训练配置一致，防止以错误维度加载网络。
 
@@ -378,9 +378,9 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 
 [打开源码](../src/supermimic/scripts/train.py)
 
-`TrainConfig` 保存环境配置、SuperMimicRunnerCfg、并行环境数、设备、W&B 动作 artifact 和本地 motion 路径。`from_task()` 按任务名加载环境。
+`TrainConfig` 保存环境配置、SuperMimicRunnerCfg、并行环境数、设备和本地 motion 路径。`from_task()` 按任务名加载环境。
 
-`main()` 先用 tyro 解析任务名，再解析嵌套配置；处理本地动作文件或下载动作 artifact；从 MaxCoord 任务名推断表示；将 return sampling 转成 mjlab 的 external sampling；创建真实环境，建立 runner 并执行 `run()`。
+`main()` 先用 tyro 解析任务名，再解析嵌套配置；验证并展开本地动作路径、通配符或打包目录；从 MaxCoord 任务名推断表示；将 return sampling 转成 mjlab 的 external sampling；创建真实环境，建立 runner 并执行 `run()`。
 
 你之前的命令只用 `--runner.run_name "1"` 设置实验名称，其他配置仍沿用默认值。
 
@@ -394,13 +394,13 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 
 [打开源码](../src/supermimic/scripts/train_utils.py)
 
-没有类。`download_registry_motions()` 下载并整理动作 artifact 路径；`setup_device()` 设置 PyTorch 后端并选设备；`create_env()` 创建 ManagerBasedRlEnv，再包成 RslRlVecEnvWrapper。
+没有类。`setup_device()` 设置 PyTorch 后端并选设备；`create_env()` 创建 ManagerBasedRlEnv，再包成 RslRlVecEnvWrapper。
 
 ### src/supermimic/scripts/play.py
 
 [打开源码](../src/supermimic/scripts/play.py)
 
-`PlayConfig` 包含 W&B run、可选本地动作文件、初始任务接口、设备和 viewer 选择。`play()` 从保存的配置重建模型和 actor，载入 checkpoint 与动作数据，在一个真实环境中播放；根据设置启动原生 MuJoCo 或 Viser viewer。`main()` 负责 CLI。
+`PlayConfig` 包含本地模型目录、可选配置文件、可选本地动作文件、初始任务接口、设备和 viewer 选择。`play()` 从保存的配置重建模型和 actor，载入 checkpoint 与动作数据，在一个真实环境中播放；根据设置启动原生 MuJoCo 或 Viser viewer。`main()` 负责 CLI。
 
 这条路径会恢复 run 的历史长度和表示模式，不是简单用当前默认网络强行加载旧权重。
 
@@ -418,7 +418,7 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 
 [打开源码](../src/supermimic/scripts/benchmark.py)
 
-`BenchmarkConfig` 配置 run、task、并行环境数量序列、循环步数、是否使用策略及 inference_mode。`benchmark()` 分别测真实环境和 Dynamics 的 steps/s；`main()` 解析配置。
+`BenchmarkConfig` 配置本地模型目录、配置文件、动作文件、task、并行环境数量序列、循环步数、是否使用策略及 inference_mode。`benchmark()` 分别测真实环境和 Dynamics 的 steps/s；`main()` 解析配置。
 
 模型性能部分使用固定形状 dummy 输入反复调用 Dynamics。真实策略部分也为计时简化了历史构造。因此这是计算吞吐测试，不是模型多步预测精度评估，也不是整个动作库的跟踪成功率评估。
 
@@ -466,15 +466,15 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 
 [打开源码](../src/supermimic/utils/logger.py)
 
-`Logger` 统计真实环境 episode 的奖励、长度和失败信息，整合环境 extras；`process_env_step()` 接收一步结果，`_episode_extras()` 整理 episode 数据，`_build_console_log()` 格式化输出，`log()` 写终端和 W&B。
+`Logger` 统计真实环境 episode 的奖励、长度和失败信息，整合环境 extras；`process_env_step()` 接收一步结果，`_episode_extras()` 整理 episode 数据，`_build_console_log()` 格式化输出，`log()` 写终端和 SwanLab。
 
 它记录训练表现，不负责损失反向传播。
 
-### src/supermimic/utils/wandb_artifacts.py
+### src/supermimic/utils/checkpoints.py
 
-[打开源码](../src/supermimic/utils/wandb_artifacts.py)
+[打开源码](../src/supermimic/utils/checkpoints.py)
 
-没有类。`download_artifact_cached()` 按内容 digest 缓存下载；`download_model_dir()` 从 run 解析带 latest 别名的模型 artifact；`_version_index()` 帮助排序版本；`log_model_artifact()` 上传 checkpoint，并按最近版本、里程碑和已有别名保留产物、清理旧版本。它负责实验产物管理，与算法计算分离。
+没有类。`resolve_motion_files()` 展开并验证本地动作；`write_run_config()` 保存配置；`load_local_run()` 读取模型目录中的配置；`run_motion_files()` 解析回放动作；`archive_checkpoint()` 在本地归档模型并保留最近版本与里程碑。SwanLab 0.9.8 负责指标和实验配置，模型及数据不依赖远程 registry。
 
 ### src/supermimic/__init__.py 与 src/supermimic/utils/__init__.py
 
@@ -515,7 +515,7 @@ critic 训练使用 detach 后的轨迹和固定目标，因此不会反过来�
 | `pyproject.toml` | Python 3.13 要求、包构建、依赖、Ruff/Pyright 配置；mjlab 指向 `../mjlab_research` editable 本地依赖 |
 | `uv.lock` | 解析后的精确依赖及下载信息；之前 nvidia-cusolver 的超时发生在依赖安装层 |
 | `LICENSE` | Apache 2.0 许可证 |
-| `.gitignore` | 忽略虚拟环境、缓存、logs、wandb、artifacts 等运行产物 |
+| `.gitignore` | 忽略虚拟环境、缓存、logs、swanlog、artifacts 等运行产物 |
 | `.pre-commit-config.yaml` | 提交前运行 Ruff 检查和格式化 |
 | `.github/workflows/ci.yml` | 自动 lint/format，并以兄弟目录布局检出 mjlab_research，安装依赖和执行 pytest |
 | `.github/workflows/claude.yml` | GitHub 上提及 @claude 时触发的辅助工作流，不参与训练 |
@@ -836,7 +836,7 @@ uv run src/supermimic/scripts/train.py SuperMimic-GenCoord-G1 \
 
 - 函数 [build_actor](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:179)。
 
-- 函数 [load_wandb_checkpoint](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:201)。
+- 函数 [load_local_checkpoint](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:201)。
 
 - 类 [Ratio](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:210)；基类：`无显式基类`。
 
@@ -844,7 +844,7 @@ uv run src/supermimic/scripts/train.py SuperMimic-GenCoord-G1 \
 
 - 类 [BaseRunner](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:229)；基类：`无显式基类`。
 
-  方法：[__init__](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:239)、[_init_common](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:263)、[_seed_sim_history](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:292)、[_collection_history](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:301)、[_advance_sim_history](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:309)、[_policy_input_dims](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:320)、[_build_mlp](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:332)、[_create_wm_env](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:356)、[_stores_actor_obs](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:370)、[_buffer_schema](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:377)、[_init_policy](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:394)、[_step_and_store](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:398)、[_flush_normalization](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:445)、[_update_actor_normalization](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:454)、[_create_log_dir](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:458)、[_init_wandb](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:466)、[_cleanup](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:490)。
+  方法：[__init__](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:239)、[_init_common](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:263)、[_seed_sim_history](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:292)、[_collection_history](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:301)、[_advance_sim_history](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:309)、[_policy_input_dims](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:320)、[_build_mlp](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:332)、[_create_wm_env](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:356)、[_stores_actor_obs](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:370)、[_buffer_schema](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:377)、[_init_policy](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:394)、[_step_and_store](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:398)、[_flush_normalization](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:445)、[_update_actor_normalization](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:454)、[_create_log_dir](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:458)、[_init_swanlab](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:466)、[_cleanup](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:490)。
 
 - 类 [SuperMimicRunner](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/runners/supermimic_runner.py:498)；基类：`BaseRunner[SuperMimicRunnerCfg]`。
 
@@ -908,7 +908,6 @@ uv run src/supermimic/scripts/train.py SuperMimic-GenCoord-G1 \
 
 [打开文件](../src/supermimic/scripts/train_utils.py)
 
-- 函数 [download_registry_motions](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/scripts/train_utils.py:14)。
 
 - 函数 [setup_device](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/scripts/train_utils.py:37)。
 
@@ -1154,19 +1153,14 @@ uv run src/supermimic/scripts/train.py SuperMimic-GenCoord-G1 \
 
 
 
-### src/supermimic/utils/wandb_artifacts.py
+### src/supermimic/utils/checkpoints.py
 
-[打开文件](../src/supermimic/utils/wandb_artifacts.py)
+[打开文件](../src/supermimic/utils/checkpoints.py)
 
-- 函数 [download_artifact_cached](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/utils/wandb_artifacts.py:15)。
-
-- 函数 [download_model_dir](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/utils/wandb_artifacts.py:49)。
-
-- 函数 [_version_index](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/utils/wandb_artifacts.py:60)。
-
-- 函数 [log_model_artifact](/data2t/haowenYan/projects/supermimic_ws/supermimic/src/supermimic/utils/wandb_artifacts.py:64)。
-
-
+- `resolve_motion_files()`：本地动作路径展开与验证。
+- `write_run_config()` / `load_local_run()`：保存、恢复模型配置。
+- `run_motion_files()`：解析训练记录中的动作或命令行覆盖路径。
+- `archive_checkpoint()`：创建包含配置的独立快照并清理旧版本。
 
 ### tests/__init__.py
 

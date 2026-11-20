@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 
 import torch
 import tyro
-import wandb
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg
@@ -18,15 +17,14 @@ from supermimic.representations import extract_actor_goal
 from supermimic.runners.run_config import check_representation_matches, load_runner_cfg
 from supermimic.runners.supermimic_runner import build_actor, build_world_model
 from supermimic.tasks.task_spec import build_actor_obs_td
-from supermimic.utils.wandb_artifacts import (
-  download_artifact_cached,
-  download_model_dir,
-)
+from supermimic.utils.checkpoints import load_local_run, run_motion_files
 
 
 @dataclass
 class BenchmarkConfig:
-  wandb_path: str
+  model_dir: str
+  config_file: str | None = None
+  motion_file: str | None = None
   task_id: str = "SuperMimic-GenCoord-G1"
   device: str | None = None
 
@@ -44,12 +42,10 @@ def benchmark(cfg: BenchmarkConfig) -> None:
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
   print(f"Using device: {device}")
 
-  print(f"[INFO] Connecting to WandB run: {cfg.wandb_path}")
-  run = wandb.Api().run(cfg.wandb_path)
-  runner_cfg = load_runner_cfg(run.config)
+  model_dir, run_config = load_local_run(cfg.model_dir, cfg.config_file)
+  runner_cfg = load_runner_cfg(run_config)
   check_representation_matches(cfg.task_id, runner_cfg.representation)
 
-  model_dir = download_model_dir(run)
   bundle = torch.load(model_dir / "world_model.pt", map_location=device)
   policy_state_dict = (
     torch.load(model_dir / "actor.pt", map_location=device) if cfg.use_policy else None
@@ -57,11 +53,8 @@ def benchmark(cfg: BenchmarkConfig) -> None:
 
   results = []
 
-  # Resolve the run's linked motion clip once; reused for every num_envs.
-  motion_file_path = None
-  motion_artifact = next((a for a in run.used_artifacts() if a.type == "motions"), None)
-  if motion_artifact:
-    motion_file_path = str(download_artifact_cached(motion_artifact) / "motion.npz")
+  # Resolve all local clips once; reused for every num_envs.
+  motion_file_path = run_motion_files(run_config, cfg.motion_file)
 
   for n_envs in cfg.num_envs_list:
     print(f"\n{'=' * 40}")

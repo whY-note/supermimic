@@ -1,4 +1,4 @@
-"""Rebuild and validate a runner config from a wandb run's serialized config."""
+"""Rebuild and validate a runner config from a saved run's serialized config."""
 
 from __future__ import annotations
 

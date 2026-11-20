@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import glob
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import mjlab.tasks  # noqa: F401
@@ -25,15 +23,15 @@ from supermimic.scripts.viewers import (
   SuperMimicViserViewer,
   create_wm_vis_model,
 )
-from supermimic.utils.wandb_artifacts import (
-  download_artifact_cached,
-  download_model_dir,
-)
+from supermimic.utils.checkpoints import load_local_run, run_motion_files
 
 
 @dataclass
 class PlayConfig:
-  wandb_path: str
+  model_dir: str
+  """Local training run directory or a versioned checkpoints/<step> directory."""
+  config_file: str | None = None
+  """Optional matching config.json for older or separately copied checkpoints."""
   motion_file: str | None = None
   initial_task: Literal["motion", "velocity"] = "motion"
   """Task selected when the viewer opens. Switch live via the GUI dropdown."""
@@ -51,46 +49,23 @@ def play(task_id: str, cfg: PlayConfig) -> None:
   env_cfg.scene.num_envs = 1
   env_cfg.observations["actor"].enable_corruption = True
 
-  import wandb
-
-  print(f"[INFO] Connecting to WandB run: {cfg.wandb_path}")
-  run = wandb.Api().run(cfg.wandb_path)
-  runner_cfg = load_runner_cfg(run.config)
+  model_dir, run_config = load_local_run(cfg.model_dir, cfg.config_file)
+  runner_cfg = load_runner_cfg(run_config)
   check_representation_matches(task_id, runner_cfg.representation)
 
-  motion_artifacts = [a for a in run.used_artifacts() if a.type == "motions"]
   command_term = env_cfg.commands["motion"]
   assert isinstance(command_term, MotionCommandCfg)
-  motion_names: list[str] = []
-  if cfg.motion_file is not None:
-    expanded = os.path.expanduser(cfg.motion_file)
-    if any(c in expanded for c in "*?[]"):
-      files = sorted(glob.glob(expanded))
-    else:
-      files = [expanded]
-    if not files:
-      raise ValueError(f"No motion files matched: {cfg.motion_file}")
-    command_term.motion_file = files
-    motion_names = [Path(f).stem for f in files]
-    print(f"[INFO] Using {len(files)} local motion(s)")
-  elif motion_artifacts:
-    motion_files = []
-    for artifact in motion_artifacts:
-      print(f"[INFO] Found linked motion artifact: {artifact.name}")
-      motion_files.append(str(download_artifact_cached(artifact) / "motion.npz"))
-    command_term.motion_file = (
-      motion_files if len(motion_files) > 1 else motion_files[0]
-    )
-    motion_names = [a.name.split(":")[0] for a in motion_artifacts]
-    print(f"[INFO] Loaded {len(motion_files)} motion(s)")
+  motion_files = run_motion_files(run_config, cfg.motion_file)
+  command_term.motion_file = motion_files
+  print(f"[INFO] Using local motions: {motion_files}")
 
   env = RslRlVecEnvWrapper(ManagerBasedRlEnv(cfg=env_cfg, device=device))
+  motion_names = env.unwrapped.command_manager.get_term("motion").motion.motion_names
 
   wm = build_world_model(runner_cfg, env, device)
   representation = wm.representation
   dynamics = wm.dynamics
 
-  model_dir = download_model_dir(run)
   wm.load_bundle(torch.load(model_dir / "world_model.pt", map_location=device))
   dynamics.eval()
 
