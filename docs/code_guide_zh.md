@@ -155,9 +155,25 @@ MaxCoord 的各刚体状态直接进入模型。需要关节角和关节速度�
 
 这是物理语义最集中的文件：它定义状态如何表示、网络输出如何积分、观测如何合成、奖励如何得到。
 
-- `StateRepresentation`：共同接口。`represent()`、`extract_aux_state()` 处理状态拆分；`apply_prediction()` 定义转移；`joint_state()` 与 `world_frame_bodies()` 为观测和奖励提供关节/刚体信息；`compute_actor_sensor()`、`build_actor_obs()` 组装策略观测；`compute_wm_goal()` 生成两个版本的 goal；`compute_wm_reward_from_reference()` 连接到解析奖励；`loss_blocks()` 定义监督误差通道。
-- `GenCoordRepresentation`：关节坐标实现。`bind()` 取得 mjlab 的可微正运动学对象。`apply_prediction()` 将根速度和关节速度增量作解析积分，再从更新后的根姿态推导重力方向。`world_frame_bodies()` 用 FK 把关节状态转为全身刚体状态。`loss_blocks()` 监督根位姿、关节角和关节速度。
-- `MaxCoordRepresentation`：刚体坐标实现。`bind()` 建立解析 IK，并定位编码器偏差在上下文中的列。`apply_prediction()` 更新每个刚体速度，在旧根系中积分，再换到新根系。`joint_state()` 调用 IK；`compute_wm_obs()` 从刚体姿态恢复可供策略使用的传感器信息。`loss_blocks()` 监督根位姿和非根刚体位置、旋转、速度及角速度。
+- `StateRepresentation`：共同接口，把仿真器中的完整机器人状态，经过坐标变换和特征重组，转换成网络使用的状态表示。
+  - `represent()`、`extract_aux_state()` 处理状态拆分；
+  - `apply_prediction()` 定义转移；
+  - `joint_state()` 与 `world_frame_bodies()` 为观测和奖励提供关节/刚体信息；
+  - `compute_actor_sensor()`、`build_actor_obs()` 组装策略观测；
+  - `compute_wm_goal()` 生成两个版本的 goal；
+  - `compute_wm_reward_from_reference()` 连接到解析奖励；
+  - `loss_blocks()` 定义监督误差通道。
+- `GenCoordRepresentation`：关节坐标实现，是`StateRepresentation`的子类。
+  - `bind()` 取得 mjlab 的可微正运动学对象。
+  - `apply_prediction()` 将根速度和关节速度增量作解析积分，再从更新后的根姿态推导重力方向。
+  - `world_frame_bodies()` 用 FK 把关节状态转为全身刚体状态。
+  - `loss_blocks()` 监督根位姿、关节角和关节速度。
+- `MaxCoordRepresentation`：刚体坐标实现，是`StateRepresentation`的子类。
+  - `bind()` 建立解析 IK，并定位编码器偏差在上下文中的列。
+  - `apply_prediction()` 更新每个刚体速度，在旧根系中积分，再换到新根系。
+  - `joint_state()` 调用 IK；
+  - `compute_wm_obs()` 从刚体姿态恢复可供策略使用的传感器信息。
+  - `loss_blocks()` 监督根位姿和非根刚体位置、旋转、速度及角速度。
 
 顶层函数分为三组：`create_representation()` 负责工厂创建；`goal_window_indices()`、`motion_goal_window()`、`motion_anchor_window()`、`assemble_anchor_window()` 负责跨时间目标；`actor_goal_dim()`、`extract_actor_goal()`、`term_major_to_temporal()` 负责目标裁剪与历史布局转换。
 

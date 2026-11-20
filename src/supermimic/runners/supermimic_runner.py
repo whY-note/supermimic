@@ -594,6 +594,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
 
   def step(self) -> int:
     with torch.inference_mode():
+      # get the current state and actor observation from the environment
       obs = self.env.get_observations()
       curr_states = obs["full_state"].to(self.device)
       sim_actor_obs = obs["actor"].to(self.device)
@@ -606,8 +607,9 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
       sim_ctx = self._sim_context.read(self.env.unwrapped)
       actor_td = self._build_sim_obs_td(
         rep_state, aux_state, sim_actor_obs, motion_times, sim_ctx
-      )
+      ) # actor TensorDict (includes the observation history and goals as the input for the actor)
 
+      # generate actions and add noise
       actions = self.policy_learner.actor(actor_td)
       actions = actions + torch.randn_like(actions) * self.policy_learner.cfg.noise
 
@@ -615,6 +617,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
       if self._stores_actor_obs:
         extra_fields["actor_obs"] = sim_actor_obs
 
+      # step the environment and store the results
       next_obs, rewards, dones, extras = self._step_and_store(
         actions,
         curr_states,
@@ -625,6 +628,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
       terminated = self.env.unwrapped.termination_manager.terminated
       self.logger.process_env_step(rewards, terminated, extras)
 
+      # update the sampling distribution if using the ReturnSampler
       if self._sampler is not None:
         # A failure on a step that also times out counts as the time-out.
         manager = self.env.unwrapped.termination_manager
@@ -674,21 +678,25 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
     checkpoint_version = 0
 
     for step in range(self.cfg.max_iterations):
+      # (1) using current policy to collect transitions into the replay buffer
       num_collected_steps += self.step()
 
       for _ in range(should_train(step)):
         if self.replay_buffer.num_transitions < self.cfg.wm.horizon:
           continue
 
+        # Sample a batch of transitions from the replay buffer for training
         data = (
           self.replay_buffer.sample(self.cfg.wm.horizon, self.cfg.wm.batch_size)
           for _ in range(self.cfg.wm.num_batches)
         )
 
+        # (2) Train the world model
         start_wm_time = time.time()
         wm_logs = self.world_model_learner.update(data)
         wm_learn_time += time.time() - start_wm_time
 
+        # (3) Train the policy
         start_policy_time = time.time()
         policy_logs = self.policy_learner.update()
         policy_learn_time += time.time() - start_policy_time
@@ -696,6 +704,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
         loss_dict.update(wm_logs)
         loss_dict.update(policy_logs)
 
+      # Logging
       if step % self.cfg.log_interval == 0:
         elapsed_time = time.time() - start_time
         total_train_time = wm_learn_time + policy_learn_time
@@ -717,6 +726,7 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
         policy_learn_time = 0
         num_collected_steps = 0
 
+      # Save checkpoints at intervals or at the last step
       if step % self.cfg.save_interval == 0 or step == self.cfg.max_iterations - 1:
         world_model_path = str(log_dir / "world_model.pt")
         actor_path = str(log_dir / "actor.pt")
